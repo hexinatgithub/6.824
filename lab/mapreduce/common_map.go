@@ -1,8 +1,17 @@
 package mapreduce
 
 import (
+	// "fmt"
+	"encoding/json"
+	"os"
+	"io/ioutil"
 	"hash/fnv"
 )
+
+type File_Encoder struct {
+	file *os.File
+	enCoder *json.Encoder
+}
 
 // doMap manages one map task: it reads one of the input files
 // (inFile), calls the user-defined map function (mapF) for that file's
@@ -53,6 +62,38 @@ func doMap(
 	//
 	// Remember to close the file after you have written all the values!
 	//
+	
+	// create and close file
+	open_files := make(map[string]File_Encoder)
+	intermediate_file_Encoder := func (filename string) *json.Encoder {
+		file_encoder, ok := open_files[filename]
+		if !ok {
+			file, err := os.Create(filename)
+			if err != nil {
+				panic("can't create file:" + filename)
+			}
+			open_files[filename] = File_Encoder{file, json.NewEncoder(file)}
+			return open_files[filename].enCoder
+		}
+		return file_encoder.enCoder
+	}
+	defer func ()  {
+		for _, file_encoder := range open_files {
+			file_encoder.file.Close()
+		}
+	}()
+
+	// Do the map task
+	content, err := ioutil.ReadFile(inFile)
+	if err != nil {
+		panic("can't read file:" + inFile)
+	}
+	kv_pairs := mapF(inFile, string(content))
+	for _, kv := range kv_pairs {
+		filename := reduceName(jobName, mapTaskNumber, ihash(kv.Key) % nReduce)
+		encoder := intermediate_file_Encoder(filename)
+		encoder.Encode(&kv)
+	}
 }
 
 func ihash(s string) int {
