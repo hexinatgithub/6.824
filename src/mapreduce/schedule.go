@@ -54,11 +54,16 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		case work := <-freeWorks:
 			doTaskArgs := DoTaskArgs{jobName, mapFiles[i], phase, i, n_other}
 			wg.Add(1)
-			go func() {
-				call(work, "Worker.DoTask", doTaskArgs, nil)
-				freeWorks <- work
-				wg.Done()
-			}()
+			var taskFunc func(string)
+			taskFunc = func(work string) {
+				if call(work, "Worker.DoTask", doTaskArgs, nil) {
+					freeWorks <- work
+					wg.Done()
+				} else { // work fail, reassign to other free work
+					taskFunc(<-freeWorks)
+				}
+			}
+			go taskFunc(work)
 		}
 	}
 	wg.Wait()
