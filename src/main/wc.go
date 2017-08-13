@@ -19,7 +19,7 @@ import (
 func mapF(filename string, contents string) []mapreduce.KeyValue {
 	// TODO: you have to write this function
 	words := strings.FieldsFunc(contents, func(c rune) bool {
-		return !unicode.IsLetter(c) // && !unicode.IsNumber(c)
+		return !unicode.IsLetter(c) && !unicode.IsNumber(c)
 	})
 	kvPairs := make([]mapreduce.KeyValue, len(words))
 	for _, word := range words {
