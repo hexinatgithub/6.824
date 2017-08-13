@@ -34,6 +34,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
 	freeWorks := make(chan string, 10)
+	done := make(chan bool)
 	var wg sync.WaitGroup
 	// get all works
 	go func() {
@@ -41,6 +42,8 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 			select {
 			case work := <-registerChan:
 				freeWorks <- work
+		        case <-done:
+				break
 			}
 		}
 	}()
@@ -59,5 +62,6 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		}
 	}
 	wg.Wait()
+	done <- true
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
