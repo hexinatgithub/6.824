@@ -59,7 +59,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 				if call(work, "Worker.DoTask", doTaskArgs, nil) {
 					freeWorks <- work
 					wg.Done()
-				} else { // work fail, reassign to other free work
+				} else { // worker fail, reassign to other free worker
 					taskFunc(<-freeWorks)
 				}
 			}
