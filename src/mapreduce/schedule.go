@@ -42,7 +42,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 			select {
 			case work := <-registerChan:
 				freeWorks <- work
-		        case <-done:
+			case <-done:
 				break
 			}
 		}
