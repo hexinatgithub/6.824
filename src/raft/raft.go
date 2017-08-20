@@ -17,13 +17,13 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "labrpc"
+import (
+	"labrpc"
+	"sync"
+)
 
 // import "bytes"
 // import "encoding/gob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -35,6 +35,12 @@ type ApplyMsg struct {
 	Command     interface{}
 	UseSnapshot bool   // ignore for lab2; only used in lab3
 	Snapshot    []byte // ignore for lab2; only used in lab3
+}
+
+// log entry
+type logEntry struct {
+	command interface{}
+	term    int
 }
 
 //
@@ -49,16 +55,37 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	// Persistent state
+	currentTerm int
+	votedFor    int
+	log         []logEntry
 
+	// Volatile State
+	commitIndex int
+	lastApplied int
+
+	// Volatile state on leaders
+	nextIndex  []int
+	matchIndex []int
+
+	// chann
+	heartbeat chan struct{}
+	isLeader  chan struct{}
+	grantVote chan struct{}
+
+	// state
+	stateHandle func()
+	state       int
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term := rf.currentTerm
+	isleader := rf.state == leader
 	return term, isleader
 }
 
@@ -93,15 +120,16 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	CandidateID  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -110,6 +138,42 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
+}
+
+// AppendEntries Invoked by leader to replicate log entries;
+// also used as heartbeat.
+type AppendEntries struct {
+	Term         int
+	LeaderID     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []interface{}
+	LeaderCommit int
+}
+
+// AppendEntriesReply is reply by call RPC in other server's AppendEntries method
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+// AppendEntries RPC handler receive heartbeat or leader's AppendEntries struct
+func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.isUpDateTo(args.PrevLogIndex, args.PrevLogTerm) {
+		reply.Success = true
+		rf.heartbeat <- struct{}{}
+		rf.currentTerm = args.PrevLogTerm
+	}
+	reply.Term = rf.currentTerm
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
 }
 
 //
@@ -117,6 +181,21 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Term = rf.currentTerm
+	granted := func() bool {
+		return rf.votedFor == -1 &&
+			rf.isUpDateTo(args.LastLogIndex, args.LastLogTerm)
+	}()
+	// if request vote server is at least as up-to-date to me,
+	// vote for it.
+	if granted {
+		rf.votedFor = args.CandidateID
+		rf.grantVote <- struct{}{}
+	}
+	reply.VoteGranted = granted
 }
 
 //
@@ -153,7 +232,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -174,7 +252,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 
-
 	return index, term, isLeader
 }
 
@@ -186,6 +263,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+}
+
+// getLastIndexAndTerm caller should lock the state before call this method
+func (rf *Raft) getLastIndexAndTerm() (int, int) {
+	l := len(rf.log)
+	if l == 0 {
+		return -1, -1
+	}
+	lastLogIndex := l - 1
+	lastTerm := rf.log[lastLogIndex].term
+	return lastLogIndex, lastTerm
+}
+
+func (rf *Raft) isUpDateTo(otherLastLogIndex, otherTerm int) bool {
+	lastLogIndex, lastTerm := rf.getLastIndexAndTerm()
+	return lastTerm == otherTerm && lastLogIndex <= otherLastLogIndex
 }
 
 //
@@ -207,10 +300,22 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rf.votedFor = -1
+	rf.state = follower
+	rf.heartbeat = make(chan struct{}, 1)
+	rf.grantVote = make(chan struct{}, 1)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
-
+	nextIndex := len(rf.log)
+	rf.nextIndex = make([]int, len(rf.peers), len(rf.peers))
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = nextIndex
+	}
+	rf.stateHandle = makeStateHandler(rf, follower)
+	go func() {
+		for {
+			rf.stateHandle()
+		}
+	}()
 	return rf
 }
