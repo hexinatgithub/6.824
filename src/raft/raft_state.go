@@ -62,11 +62,15 @@ func electionTime() time.Duration {
 }
 
 // setRaftState use safe way to change the Raft's state
+// f is caller defined function to change the Raft's state, f should not call goroutine,
+// otherwise the setRaftState will lose safety meaning.
 func setRaftState(rf *Raft, state int, f func()) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.state = state
-	rf.stateHandle = makeStateHandler(rf, state)
+	if state != rf.state {
+		rf.state = state
+		rf.stateHandle = makeStateHandler(rf, state)
+	}
 	if f != nil {
 		f()
 	}
@@ -104,12 +108,12 @@ func makeCandidateHandler(rf *Raft) func() {
 		case <-rf.isLeader:
 			setRaftState(rf, leader, closeChan)
 		case <-time.After(electionTime()):
-			rf.mu.Lock()
-			closeChan()
-			rf.isLeader = make(chan struct{}, 1)
-			rf.currentTerm++
-			broadcoastRequestVote(rf)
-			rf.mu.Unlock()
+			setRaftState(rf, candidate, func() {
+				closeChan()
+				rf.isLeader = make(chan struct{}, 1)
+				rf.currentTerm++
+				broadcoastRequestVote(rf)
+			})
 		}
 	}
 }
@@ -124,9 +128,9 @@ func makeLeaderHandler(rf *Raft) func() {
 		case <-rf.heartbeat:
 			setRaftState(rf, follower, nil)
 		case <-time.After(time.Second / 10):
-			rf.mu.Lock()
-			broadcoastAppendEntries(rf, nil)
-			rf.mu.Unlock()
+			setRaftState(rf, leader, func() {
+				broadcoastAppendEntries(rf, nil)
+			})
 		}
 	}
 }
