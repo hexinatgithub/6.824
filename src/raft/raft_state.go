@@ -11,6 +11,16 @@ const (
 	leader
 )
 
+// broadcoast call send function to send message to every other peer
+// send function will pass the index number in rf's peers
+func broadcoast(rf *Raft, send func(int)) {
+	for i := range rf.peers {
+		if i != rf.me {
+			go send(i)
+		}
+	}
+}
+
 // broadcoastAppendEntries send the RequestVoteArgs struct to other peers expect itself,
 // the peer vote for itself.
 func broadcoastRequestVote(rf *Raft) {
@@ -20,23 +30,18 @@ func broadcoastRequestVote(rf *Raft) {
 	args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, lastTerm}
 	count := 1
 
-	for i := range rf.peers {
-		if i != rf.me {
-			i := i
-			go func() {
-				reply := RequestVoteReply{-1, false}
-				ok := rf.sendRequestVote(i, &args, &reply)
-				if ok && reply.VoteGranted {
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-					count++
-					if rf.state == candidate && (count > len(rf.peers)/2) {
-						rf.isLeader <- struct{}{}
-					}
-				}
-			}()
+	broadcoast(rf, func(server int) {
+		reply := RequestVoteReply{-1, false}
+		ok := rf.sendRequestVote(server, &args, &reply)
+		if ok && reply.VoteGranted {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			count++
+			if rf.state == candidate && (count > len(rf.peers)/2) {
+				rf.isLeader <- struct{}{}
+			}
 		}
-	}
+	})
 }
 
 // broadcoastAppendEntries send the AppendEntries struct to every server expect itself
@@ -44,15 +49,10 @@ func broadcoastAppendEntries(rf *Raft, logs []interface{}) {
 	lastLogIndex, lastTerm := rf.getLastIndexAndTerm()
 	args := AppendEntries{rf.currentTerm, rf.me, lastLogIndex,
 		lastTerm, logs, rf.commitIndex}
-	for i := range rf.peers {
-		if i != rf.me {
-			i := i
-			go func() {
-				reply := AppendEntriesReply{-1, false}
-				rf.sendAppendEntries(i, &args, &reply)
-			}()
-		}
-	}
+	broadcoast(rf, func(server int) {
+		reply := AppendEntriesReply{-1, false}
+		rf.sendAppendEntries(server, &args, &reply)
+	})
 }
 
 // electionTime generate random election timeout
