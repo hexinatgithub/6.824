@@ -169,6 +169,7 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 		rf.currentTerm = args.PrevLogTerm
 	}
 	reply.Term = rf.currentTerm
+	// println("heartbeat", rf.me, args.LeaderID)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) bool {
@@ -186,8 +187,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.Term = rf.currentTerm
 	granted := func() bool {
-		return rf.votedFor == -1 &&
-			rf.isUpDateTo(args.LastLogIndex, args.LastLogTerm)
+		canVote := (rf.votedFor == -1) || (rf.currentTerm < args.Term)
+		isUpDateTo := rf.isUpDateTo(args.LastLogIndex, args.LastLogTerm)
+		return canVote && isUpDateTo
 	}()
 	// if request vote server is at least as up-to-date to me,
 	// vote for it.
@@ -196,6 +198,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.grantVote <- struct{}{}
 	}
 	reply.VoteGranted = granted
+	// println("me vote for:", rf.me, granted, args.CandidateID)
 }
 
 //
@@ -276,9 +279,9 @@ func (rf *Raft) getLastIndexAndTerm() (int, int) {
 	return lastLogIndex, lastTerm
 }
 
-func (rf *Raft) isUpDateTo(otherLastLogIndex, otherTerm int) bool {
+func (rf *Raft) isUpDateTo(otherLastLogIndex, otherLastTerm int) bool {
 	lastLogIndex, lastTerm := rf.getLastIndexAndTerm()
-	return lastTerm == otherTerm && lastLogIndex <= otherLastLogIndex
+	return lastTerm == otherLastTerm && lastLogIndex <= otherLastLogIndex
 }
 
 //
