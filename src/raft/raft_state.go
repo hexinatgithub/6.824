@@ -11,54 +11,24 @@ const (
 	leader
 )
 
-// broadcoast call send function to send message to every other peer
-// send function will pass the index number in rf's peers
-func broadcoast(rf *Raft, send func(int)) {
-	for i := range rf.peers {
-		if i != rf.me {
-			go send(i)
-		}
+func min(x, y int) int {
+	if x < y {
+		return x
 	}
+	return y
 }
 
-// broadcoastAppendEntries send the RequestVoteArgs struct to other peers expect itself,
-// the peer vote for itself.
-func broadcoastRequestVote(rf *Raft) {
-	// vote for self
-	rf.votedFor = rf.me
-	lastLogIndex, lastTerm := rf.getLastIndexAndTerm()
-	args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, lastTerm}
-	count := 1
-
-	broadcoast(rf, func(server int) {
-		reply := RequestVoteReply{-1, false}
-		ok := rf.sendRequestVote(server, &args, &reply)
-		if ok && reply.VoteGranted {
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			count++
-			if rf.state == candidate && (count > len(rf.peers)/2) {
-				rf.isLeader <- struct{}{}
-			}
-		}
-	})
+func max(x, y int) int {
+	if x > y {
+		return x
+	}
+	return y
 }
 
-// broadcoastAppendEntries send the AppendEntries struct to every server expect itself
-func broadcoastAppendEntries(rf *Raft, logs []interface{}) {
-	lastLogIndex, lastTerm := rf.getLastIndexAndTerm()
-	args := AppendEntries{rf.currentTerm, rf.me, lastLogIndex,
-		lastTerm, logs, rf.commitIndex}
-	broadcoast(rf, func(server int) {
-		reply := AppendEntriesReply{-1, false}
-		rf.sendAppendEntries(server, &args, &reply)
-	})
-}
-
-// electionTime generate random election timeout
-func electionTime() time.Duration {
-	f := time.Duration(rand.Int31n(150) + 300)
-	return time.Duration(f * time.Millisecond)
+func resetTimer(timer *time.Timer, duration time.Duration) {
+	if timer.Reset(duration) {
+		panic("timer is running or not stop")
+	}
 }
 
 // setRaftState use safe way to change the Raft's state
@@ -76,18 +46,25 @@ func setRaftState(rf *Raft, state int, f func()) {
 	}
 }
 
+func electionTime() time.Duration {
+	f := time.Duration(rand.Int31n(300) + 300)
+	return time.Duration(f * time.Millisecond)
+}
+
 // makeFollowerHandler create a followerHandler handle,
 // followerHandler handle the Raft action when it is in follower state
 func makeFollowerHandler(rf *Raft) func() {
 	return func() {
+		resetTimer(rf.timer, electionTime())
 		select {
-		case <-rf.heartbeat:
-		case <-rf.grantVote:
-		case <-time.After(electionTime()):
+		case <-rf.commandMessage:
+			// println("follower receive command message", rf.me)
+		case <-rf.timer.C:
+			// println(rf.me, "follower to candidate")
 			setRaftState(rf, candidate, func() {
 				rf.currentTerm++
-				rf.isLeader = make(chan struct{}, 1)
-				broadcoastRequestVote(rf)
+				rf.canBeLeader = make(chan bool, 1)
+				rf.broadcoastRequestVote()
 			})
 		}
 	}
@@ -97,22 +74,33 @@ func makeFollowerHandler(rf *Raft) func() {
 // candidateHandler handle the Raft action when it is in candidate state
 func makeCandidateHandler(rf *Raft) func() {
 	return func() {
+		resetTimer(rf.timer, electionTime())
 		closeChan := func() {
-			close(rf.isLeader)
+			close(rf.canBeLeader)
 		}
 		select {
-		case <-rf.grantVote:
+		case <-rf.commandMessage:
 			setRaftState(rf, follower, closeChan)
-		case <-rf.heartbeat:
-			setRaftState(rf, follower, closeChan)
-		case <-rf.isLeader:
-			setRaftState(rf, leader, closeChan)
-		case <-time.After(electionTime()):
+		case ok := <-rf.canBeLeader:
+			// println(rf.me, "candidate become Leader")
+			if ok {
+				setRaftState(rf, leader, func() {
+					rf.nextIndex = make([]int, len(rf.peers), len(rf.peers))
+					rf.matchIndex = make([]int, len(rf.peers), len(rf.peers))
+					logLength := len(rf.log)
+					for i := range rf.nextIndex {
+						rf.nextIndex[i] = logLength
+					}
+					closeChan()
+				})
+			} else {
+				setRaftState(rf, follower, closeChan)
+			}
+		case <-rf.timer.C:
 			setRaftState(rf, candidate, func() {
-				closeChan()
-				rf.isLeader = make(chan struct{}, 1)
 				rf.currentTerm++
-				broadcoastRequestVote(rf)
+				rf.broadcoastRequestVote()
+				// println(rf.me, "reelection")
 			})
 		}
 	}
@@ -122,15 +110,19 @@ func makeCandidateHandler(rf *Raft) func() {
 // leaderHandler handle the Raft action when it is in leader state
 func makeLeaderHandler(rf *Raft) func() {
 	return func() {
+		resetTimer(rf.timer, time.Second/11)
+		// println("leader", ok)
+		releaseFun := func() {
+			rf.nextIndex = nil
+			rf.matchIndex = nil
+		}
 		select {
-		case <-rf.grantVote:
-			setRaftState(rf, follower, nil)
-		case <-rf.heartbeat:
-			setRaftState(rf, follower, nil)
-		case <-time.After(time.Second / 10):
-			setRaftState(rf, leader, func() {
-				broadcoastAppendEntries(rf, nil)
-			})
+		case <-rf.commandMessage:
+			setRaftState(rf, follower, releaseFun)
+			// println(rf.me, "leader become follower")
+		case <-rf.timer.C:
+			setRaftState(rf, leader, rf.broadcoastAppendEntries)
+			// println(rf.me, "heartbeat")
 		}
 	}
 }
