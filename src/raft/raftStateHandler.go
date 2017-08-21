@@ -82,8 +82,8 @@ func makeCandidateHandler(rf *Raft) func() {
 		case <-rf.commandMessage:
 			setRaftState(rf, follower, closeChan)
 		case ok := <-rf.canBeLeader:
-			// println(rf.me, "candidate become Leader")
 			if ok {
+				// println(rf.me, "candidate become Leader")
 				setRaftState(rf, leader, func() {
 					rf.nextIndex = make([]int, len(rf.peers), len(rf.peers))
 					rf.matchIndex = make([]int, len(rf.peers), len(rf.peers))
