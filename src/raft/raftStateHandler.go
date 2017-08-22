@@ -57,13 +57,13 @@ func makeFollowerHandler(rf *Raft) func() {
 	return func() {
 		resetTimer(rf.timer, electionTime())
 		select {
-		case <-rf.commandMessage:
+		case <-rf.becomeFlw:
 			// println("follower receive command message", rf.me)
 		case <-rf.timer.C:
-			// println(rf.me, "follower to candidate")
 			setRaftState(rf, candidate, func() {
 				rf.currentTerm++
 				rf.canBeLeader = make(chan bool, 1)
+				// println(rf.me, "follower to candidate: term", rf.currentTerm)
 				rf.broadcoastRequestVote()
 			})
 		}
@@ -79,28 +79,32 @@ func makeCandidateHandler(rf *Raft) func() {
 			close(rf.canBeLeader)
 		}
 		select {
-		case <-rf.commandMessage:
+		case <-rf.becomeFlw:
+			// println(rf.me, "command candidate to follower")
 			setRaftState(rf, follower, closeChan)
 		case ok := <-rf.canBeLeader:
 			if ok {
-				// println(rf.me, "candidate become Leader")
+				// println(rf.me, "candidate become Leader: term", rf.currentTerm)
 				setRaftState(rf, leader, func() {
 					rf.nextIndex = make([]int, len(rf.peers), len(rf.peers))
 					rf.matchIndex = make([]int, len(rf.peers), len(rf.peers))
 					logLength := len(rf.log)
 					for i := range rf.nextIndex {
 						rf.nextIndex[i] = logLength
+						rf.matchIndex[i] = -1
 					}
 					closeChan()
+					rf.broadcoastAppendEntries()
 				})
 			} else {
+				// println(rf.me, "candidate to follower")
 				setRaftState(rf, follower, closeChan)
 			}
 		case <-rf.timer.C:
 			setRaftState(rf, candidate, func() {
 				rf.currentTerm++
 				rf.broadcoastRequestVote()
-				// println(rf.me, "reelection")
+				// println(rf.me, "reelection: term", rf.currentTerm)
 			})
 		}
 	}
@@ -117,9 +121,9 @@ func makeLeaderHandler(rf *Raft) func() {
 			rf.matchIndex = nil
 		}
 		select {
-		case <-rf.commandMessage:
+		case <-rf.becomeFlw:
 			setRaftState(rf, follower, releaseFun)
-			// println(rf.me, "leader become follower")
+			// println(rf.me, "leader become follower", rf.currentTerm)
 		case <-rf.timer.C:
 			setRaftState(rf, leader, rf.broadcoastAppendEntries)
 			// println(rf.me, "heartbeat")
