@@ -72,7 +72,7 @@ type Raft struct {
 	// chann
 	applyCh     chan ApplyMsg
 	becomeFlw   chan struct{}
-	canBeLeader chan bool
+	canBeLeader chan struct{}
 	grantVote   chan struct{}
 
 	// state
@@ -347,27 +347,27 @@ func (rf *Raft) broadcoastRequestVote() {
 	lastLogIndex, lastTerm := rf.getLastIndexAndTerm()
 	args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, lastTerm}
 	countVote := 1
-	countNewerPeer := 0
+	changeState := false
+
 	requestVoteHandler := func(server int, reply *RequestVoteReply) {
-		if reply.VoteGranted {
-			if countVote == len(rf.peers)/2 {
-				go func() {
-					rf.stopTimer()
-					rf.canBeLeader <- true
-				}()
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.state == candidate {
+			if reply.VoteGranted {
+				if countVote == len(rf.peers)/2 {
+					go func() {
+						rf.stopTimer()
+						rf.canBeLeader <- struct{}{}
+					}()
+				}
+				countVote++
+			} else if reply.Term > args.Term {
+				if !changeState {
+					rf.currentTerm = reply.Term
+					changeState = true
+					go rf.becomeFollower()
+				}
 			}
-			countVote++
-		} else if reply.Term > args.Term {
-			rf.currentTerm = reply.Term
-			go rf.becomeFollower()
-		} else {
-			if countNewerPeer == len(rf.peers)/2 {
-				go func() {
-					rf.stopTimer()
-					rf.canBeLeader <- false
-				}()
-			}
-			countNewerPeer++
 		}
 	}
 
@@ -375,10 +375,7 @@ func (rf *Raft) broadcoastRequestVote() {
 		if i != rf.me {
 			go func(server int) {
 				reply := RequestVoteReply{-1, false}
-				ok := rf.sendRequestVote(server, &args, &reply)
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				if ok && rf.state == candidate {
+				if rf.sendRequestVote(server, &args, &reply) {
 					requestVoteHandler(server, &reply)
 				}
 			}(i)
@@ -392,21 +389,30 @@ func (rf *Raft) broadcoastAppendEntries() {
 	count := 1
 	logLen := len(rf.log)
 	lastIndex := logLen - 1
+	changeState := false
+
 	repleyHandler := func(server int, args *AppendEntries, reply *AppendEntriesReply) {
-		if reply.Success {
-			if count == (len(rf.peers) / 2) {
-				rf.commitIndex = lastIndex
-				go rf.applyLogs()
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.state == leader {
+			if reply.Success {
+				if count == (len(rf.peers) / 2) {
+					rf.commitIndex = lastIndex
+					go rf.applyLogs()
+				}
+				count++
+				rf.nextIndex[server] = logLen
+				rf.matchIndex[server] = lastIndex
+			} else if reply.Term > args.Term {
+				if !changeState {
+					rf.currentTerm = reply.Term
+					changeState = true
+					go rf.becomeFollower()
+				}
+			} else {
+				// println("send to server failed", server, rf.nextIndex[server], lastIndex)
+				rf.nextIndex[server] = max(rf.nextIndex[server]-1, 0)
 			}
-			count++
-			rf.nextIndex[server] = logLen
-			rf.matchIndex[server] = lastIndex
-		} else if reply.Term > args.Term {
-			rf.currentTerm = reply.Term
-			go rf.becomeFollower()
-		} else {
-			// println("send to server failed", server, rf.nextIndex[server], lastIndex)
-			rf.nextIndex[server] = max(rf.nextIndex[server]-1, 0)
 		}
 	}
 
@@ -426,10 +432,7 @@ func (rf *Raft) broadcoastAppendEntries() {
 			reply := AppendEntriesReply{-1, false}
 
 			go func(server int) {
-				ok := rf.sendAppendEntries(server, &args, &reply)
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				if ok && rf.state == leader {
+				if rf.sendAppendEntries(server, &args, &reply) {
 					repleyHandler(server, &args, &reply)
 				}
 			}(i)
@@ -442,7 +445,20 @@ func (rf *Raft) stopTimer() {
 	defer rf.mu.Unlock()
 	// if it is expire, drain the channel
 	if !rf.timer.Stop() {
-		<-rf.timer.C
+		select {
+		case <-rf.timer.C:
+		default:
+			return
+		}
+	}
+}
+
+func (rf *Raft) resetTimer(duration time.Duration) {
+	rf.stopTimer()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.timer.Reset(duration) {
+		panic("timer is running or not stop")
 	}
 }
 
@@ -458,6 +474,8 @@ func (rf *Raft) applyLogs() {
 
 func (rf *Raft) becomeFollower() {
 	rf.stopTimer()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.becomeFlw <- struct{}{}
 }
 
@@ -479,7 +497,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// println(len(peers))
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = -1
 	rf.votedFor = -1
