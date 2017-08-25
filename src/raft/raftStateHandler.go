@@ -18,17 +18,39 @@ func min(x, y int) int {
 	return y
 }
 
-func max(x, y int) int {
-	if x > y {
-		return x
+func (rf *Raft) stopTimer() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// if it is expire, drain the channel
+	if !rf.timer.Stop() {
+		select {
+		case <-rf.timer.C:
+		default:
+			return
+		}
 	}
-	return y
 }
 
-// setRaftState use safe way to change the Raft's state
+func (rf *Raft) resetTimer(duration time.Duration) {
+	rf.stopTimer()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.timer.Reset(duration) {
+		panic("timer is running or not stop")
+	}
+}
+
+func (rf *Raft) becomeFollower() {
+	rf.stopTimer()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.becomeFlw <- struct{}{}
+}
+
+// changeState use safe way to change the Raft's state
 // f is caller defined function to change the Raft's state, f should not call goroutine,
-// otherwise the setRaftState will lose safety meaning.
-func setRaftState(rf *Raft, state int, f func()) {
+// otherwise the changeState will lose safety meaning.
+func (rf *Raft) changeState(state int, f func()) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if state != rf.state {
@@ -52,14 +74,12 @@ func makeFollowerHandler(rf *Raft) func() {
 		rf.resetTimer(electionTime())
 		select {
 		case <-rf.becomeFlw:
-			// println("follower receive command message", rf.me)
 		case <-rf.timer.C:
-			setRaftState(rf, candidate, func() {
+			rf.changeState(candidate, func() {
 				rf.currentTerm++
 				rf.canBeLeader = make(chan struct{}, 1)
 				rf.broadcoastRequestVote()
 			})
-			// println(rf.me, "follower to candidate: term", rf.currentTerm)
 		}
 	}
 }
@@ -74,11 +94,9 @@ func makeCandidateHandler(rf *Raft) func() {
 		}
 		select {
 		case <-rf.becomeFlw:
-			// println(rf.me, "command candidate to follower")
-			setRaftState(rf, follower, closeChan)
+			rf.changeState(follower, closeChan)
 		case <-rf.canBeLeader:
-			// println(rf.me, "candidate become Leader: term", rf.currentTerm)
-			setRaftState(rf, leader, func() {
+			rf.changeState(leader, func() {
 				rf.nextIndex = make([]int, len(rf.peers), len(rf.peers))
 				rf.matchIndex = make([]int, len(rf.peers), len(rf.peers))
 				logLength := len(rf.log)
@@ -90,10 +108,9 @@ func makeCandidateHandler(rf *Raft) func() {
 				rf.broadcoastAppendEntries()
 			})
 		case <-rf.timer.C:
-			setRaftState(rf, candidate, func() {
+			rf.changeState(candidate, func() {
 				rf.currentTerm++
 				rf.broadcoastRequestVote()
-				// println(rf.me, "reelection: term", rf.currentTerm)
 			})
 		}
 	}
@@ -110,10 +127,9 @@ func makeLeaderHandler(rf *Raft) func() {
 		}
 		select {
 		case <-rf.becomeFlw:
-			setRaftState(rf, follower, releaseFun)
+			rf.changeState(follower, releaseFun)
 		case <-rf.timer.C:
-			setRaftState(rf, leader, rf.broadcoastAppendEntries)
-			// println(rf.me, "heartbeat")
+			rf.changeState(leader, rf.broadcoastAppendEntries)
 		}
 	}
 }
