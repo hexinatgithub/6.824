@@ -1,0 +1,270 @@
+2017 Lecture 7: Spinnaker Case Study
+
+Reading: "Using Paxos to build a scalable, consistent and hihgly available
+datastore", by Rao, Shekita, Tata, Proc. VLDB 37, 2011
+
+Why are we reading this paper?
+ Case study of using Paxos to build a K/V server      
+   Same goal as lab 3, except substitute Paxos/Raft
+   Authors use Paxos in a way that looks a lot like Raft
+ One of first papers to Paxos/Raft for data replication
+   Instead of configuration service a la Chubby/Zookeeper
+   
+Several tricky issues
+  strong consistency
+  exactly-once semantics
+  snapshot to shorten the log
+  scaling performance
+
+K/V service
+  Put(Key, Value)
+  Get(key) -> Value
+  Spinnaker's interface is more complicated
+
+Setup
+  Many clients, issuing Put/Gets RPCs
+  3 servers
+  Ignore Spinnaker's sharding for now
+
+Goal
+  strong consistency
+    behave as an unreplicated system
+    Get reads value of last completed Put
+  highly available
+    survive one failure
+    use 3 to handle split brain
+
+Consistency
+  behave as an unreplicated system --- what does that mean?
+    what if a Put and Get are executed concurrently on a single-machine K/V service?
+    what must the outcome be?
+  several definitions for strong consistency
+  lab 3 chooses linearizable
+
+Linearizability
+  A history h of operations is linearizable if there is a linear order of the
+  completed operations such that:
+    - For every completed operation in h, the operation returns the same result in
+      the execution as the operation would return if every operation was completed
+      one by one in order h.
+    - If an operation op1 completes (gets a response) before op2 begins (invokes),
+      then op1 precedes op2 in h.
+  Another way of saying the above is:
+     - h's invocations and responses can be reordered to yield a sequential history;
+     - that sequential history is correct according to the sequential definition of the object;
+     - if a response preceded an invocation in the original history, it must
+       still precede it in the sequential reordering.   
+  By example:
+    If Put/Get start concurrently, either ordering is fine
+    If Put() finished before Get starts, Get() must see result of Put()
+
+Sequential consistency
+  Another popular definitions for strong consistency
+    All Puts are in total order
+    All Puts/Gets must be consistent with client-order
+  Doesn't guarantee that Get sees result of Put if Put completed in real-time before Get
+    C1: Put(k1, v0)  Put(k1, v1)
+    C2:                           Get(k1)-> v0
+    time ---------->------------>-------------->----
+  Above sequence is sequentially consistent by not linearizable
+
+Time-line consistency
+  Put()s in total order
+  Get() can return the result of any Put()
+  ==> Get() can return stale data
+  But, any cohort can respond
+    higher availability
+
+Programmability vs. Availability
+  Strong consistency
+    Easier to program
+    Lower availability
+  Weaker consistency
+    More difficul tto program
+    Higher availability
+  Labs go for strong consistency (linearizable)
+
+Approach to consistency: exploit replicated log
+  Raft provides us with consistent, replicated log
+    [Modify servers to have a log]
+  Good building block but insufficient for a K/V service
+    How to use the replicated log to build K/V service?
+
+Plan 1 for Put (broken)
+  Plan:
+    Client sends Put to leader
+    Leader calls Start()
+    Performs Put()
+    Sends a response back to client
+  Good: leader orders Puts
+  Bad: leader responds too soon
+    Client thinks RPC succeeded
+    But server may fail right after sending response
+    => Put never happens
+  Must wait until Put() shows up in log
+
+Plan 2 for Put (slow and incomplete)
+  Clients all contact leader
+  Leader inserts all Puts/Gets in log
+  When leader sees a committed Get(k) in log, it returns the value of the last Put(k) in the log to the client
+    Log is a linear history
+    Puts that completed before Get started are in the log before Get
+      Get see the results of those Puts
+  Bad: slow, need to scan log
+    Would be nice if we could keep a K/V map
+    Put updates the K/V map
+    Get reads from the K/V
+  Bad: what if leader fails before entering Op in Log?
+    Client never receives response.
+  
+Plan 3 for Put (broken)
+  Plan
+    Client sends Put to leader
+    Leader calls Start()
+      Operations contains Put, args, and client ID
+      Raft replicates operation
+    Put shows up on applyCh when committed to log
+    All servers performs Put()s in the log order
+      Put is deterministic
+      All puts applied in the same global order
+      K/V must be consistent across servers
+    Leader sends a response back to client
+      as soon it applies the client's Put
+      client ID is in operation
+  Good: fast
+  Bad: no retry
+
+Plan 4 for Put (correct, retry with duplicate detection)
+   Client keeps retrying until response from service
+     If failure, try other server
+     Add seqno to client requests
+     When Put() is successful, increase seqno
+   Server maintain duplicate detection table
+     When server executes op from log:
+       if !duplicate[clientid] = seqno:
+          res = perform Put on K/V
+          duplicate[clientid] = res
+       if leader:
+          send duplicate[clientid] to client
+   
+Plan 1 for Get (broken)
+  Plan:
+    Client sends Get to any server
+    Server performs Get and replies
+  Good: high throughput
+    Any server can process Get
+  Bad: server sends stale value
+    Primary committed new value to log before client started Get()
+    But follower hasn't received log entry yet (maybe partitioned)
+    Follower will return stale value
+    Not linearizable
+  Get must see all committed operations
+    Spinnaker returns stale value if client specifies time-line consistency
+
+Plan 2 for Get (broken)
+  Plan:
+    Client sends Get to primary
+    Primary performs Get and replies
+  Good: Primary knows what ops have been committed to log
+  Bad: Primary can return stale value anyway
+    Primary is old primary, perhaps partitioned
+    Another client may have contacted new primary and performed Put
+    Old primary returns stale value
+    Could not happen in unreplicated system
+    
+Plan 3 for Get
+  Simple solution:
+    Run Get() operations also through the log, like Put()s
+    Lab 3 does this
+  Raft paper
+    Don't run Get() through log, but make sure leader has last committed operation
+    New primary adds a null entry after becoming primary
+    Primary pings followers to see if it is still the primary before processing Get()
+
+Challenge: log grows without bound
+  Need a way to shorten log
+  Idea: snapshots
+    Snapshot K/V table when log reaches max size
+    Remember last log sequence number (LSN) included in snapshot
+    Remove all operations through LSN
+  Why OK?
+    if all servers have a consistent snapshot
+       snapshot includes all ops through the same log entry
+    then on recovery:
+       load last snapshot in memory
+       apply new operations in log to snapshot
+  Challenge: servers may not have last snapshot
+     Raft handles it for us
+     
+Engineering challenge: making snapshots
+  K/V lives above Raft
+  Log lives in Raft
+  Solution:
+    K/V makes shapshots
+    K/V tells Raft about shapshot, including LSN for snapshot
+    Raft tells K/V to install snapshots on applyCh
+  Why do communicate snapshots over applyCh?
+  Where do they appear on applyCh?
+  Must snapshot include duplicate-detection table?
+
+Engineering challenge: coordination between K/V server and Raft library
+  K/V server must have locks to protect its state
+  Raft library has locks to protect its state
+  Upcalls delivered through applyCh
+  Easy to get deadlocks. For example on primary:
+    Raft goroutine holds Raft lock
+      E.g., received response from follower
+    Sends on applyCh while holding lock
+      the follower indicated a new log entry has been committed
+      holds lock because log entries must be inserted in order in applyCh
+    Goroutine blocks because  applyCh is full
+    Goroutine in K/V layer calls Raft library for Start(), or Snapshot()
+      library already holds lock, so K/V goroutine blocks
+    No Goroutine reads from applyCh
+  Need to have a plan to manage concurrency
+
+One possible plan:
+  Always acquire locks in specific order
+     E.g., K/V lock, then Raft lock
+     How to deal with upcalls? (calls from Raft to K/V)
+  Raft:
+    RPC reply handlers never write to applyCh
+    Separate goroutine for writing to applyCh
+      release raft lock before writing to applyCh
+      order will be ok, because only one goroutine that sends on applyCh
+  K/V layer
+    One goroutine that reads from applyCh and applies Ops on K/V
+    Release K/V lock before reading from applyCh
+
+Performance challenge: performance limited by replicated log
+  All Put operations must go through leader
+  Each Put operations requires chatter with followers to replicate
+  Idea: shard K/V
+    A raft instance per shard
+    Operations on different shards can go in parallel
+    => increases throughput of K/V service
+  Implementation using a master
+    Master to coordinate shards
+    Stores mapping from keys to shards
+    Load balances keys across shards (lab 4)
+    Master implemented as its own Raft instance
+
+Performance challenge for Spinnaker
+  Several cohorts share a single disk
+  Seeks are slow on magnetic disks
+  Solution: share log between different cohorts
+  Complications:
+    Logical truncation, etc.
+
+Summary
+  Replicated log useful building block
+  But insufficient for building replicated services
+  Need solutions for:
+   ensuring strong consistency
+   ensuring exactly-once semantics
+   truncating the log
+   sharding applications tate
+
+
+References
+  http://www.vldb.org/2011/files/slides/research15/rSession15-1.ppt
