@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -17,12 +18,45 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	OP_PUT    = "Put"
+	OP_GET    = "Get"
+	OP_APPEND = "Append"
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+
+	Kind  string
+	Key   string
+	Value string
+	RequstArgs
 }
+
+func (op *Op) isEqual(other Op) bool {
+	if other.Kind != op.Kind {
+		return false
+	}
+
+	switch op.Kind {
+	case OP_GET, OP_APPEND:
+		return other.Key == op.Key && other.Kind == op.Kind &&
+			other.RequstArgs == op.RequstArgs
+	case OP_PUT:
+		return other == *op
+	default:
+		return false
+	}
+}
+
+type CommitReply struct {
+	op  Op
+	err Err
+}
+
+type ApplyReply CommitReply
 
 type RaftKV struct {
 	mu      sync.Mutex
@@ -33,15 +67,118 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	data        map[string]string
+	commitReply map[int]chan CommitReply
+	history     map[int64]int // client session map to commited requstID
 }
 
+func (kv *RaftKV) commitLog(op Op) CommitReply {
+	kv.mu.Lock()
+	var reply CommitReply
+	reply.op.Kind = op.Kind
+	reply.op.Key = op.Key
+	_, isLeader := kv.rf.GetState()
+
+	// not leader return
+	if !isLeader {
+		kv.mu.Unlock()
+		reply.err = ErrNotLeader
+		return reply
+	}
+
+	// duplicate request, just return data
+	if kv.history[op.Session] >= op.RequstID {
+		reply.err = OK
+		reply.op.Value = kv.data[op.Key]
+		kv.mu.Unlock()
+		return reply
+	}
+
+	// commit log
+	index, term, isLeader := kv.rf.Start(op)
+	ch := make(chan CommitReply, 1)
+	kv.commitReply[index] = ch
+	kv.mu.Unlock()
+	defer func() {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		close(kv.commitReply[index])
+		delete(kv.commitReply, index)
+	}()
+
+	select {
+	case reply = <-ch:
+		currentTerm, _ := kv.rf.GetState()
+		if !op.isEqual(reply.op) || term != currentTerm {
+			reply.err = ErrNotLeader
+		}
+	case <-time.After(time.Second):
+		reply.err = ErrCommit
+	}
+	return reply
+}
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	logEntry := Op{Kind: OP_GET, Key: args.Key, RequstArgs: RequstArgs{Session: args.Session, RequstID: args.RequstID}}
+	commitRpl := kv.commitLog(logEntry)
+	reply.Err = commitRpl.err
+	reply.WrongLeader = commitRpl.err == ErrNotLeader
+	reply.Value = commitRpl.op.Value
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	logEntry := Op{Kind: args.Op, Key: args.Key, Value: args.Value, RequstArgs: RequstArgs{Session: args.Session, RequstID: args.RequstID}}
+	commitRpl := kv.commitLog(logEntry)
+	reply.Err = commitRpl.err
+	reply.WrongLeader = commitRpl.err == ErrNotLeader
+}
+
+func (kv *RaftKV) applyLog(op Op) ApplyReply {
+	var reply ApplyReply
+	reply.err = OK
+	reply.op = op
+
+	// duplicate request, just return data
+	if kv.history[op.Session] >= op.RequstID {
+		reply.op.Value = kv.data[op.Key]
+		return reply
+	}
+	
+	// apply log
+	switch op.Kind {
+	case OP_GET:
+		_, ok := kv.data[op.Key]
+		if !ok {
+			reply.err = ErrNoKey
+		}
+	case OP_PUT:
+		kv.data[op.Key] = op.Value
+	case OP_APPEND:
+		kv.data[op.Key] += op.Value
+	}
+	reply.op.Value = kv.data[op.Key]
+	// save session
+	kv.history[op.Session] = op.RequstID
+
+	return reply
+}
+
+func (kv *RaftKV) watch() {
+	for msg := range kv.applyCh {
+		kv.mu.Lock()
+		op := msg.Command.(Op)
+		applyReply := kv.applyLog(op)
+		
+		// only leader have reply channel
+		rplChan, ok := kv.commitReply[msg.Index]
+
+		if ok {
+			rplChan <- CommitReply(applyReply)
+		}
+		kv.mu.Unlock()
+	}
 }
 
 //
@@ -79,10 +216,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 10)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.data = make(map[string]string)
+	kv.history = make(map[int64]int)
+	kv.commitReply = make(map[int]chan CommitReply)
 
 	// You may need initialization code here.
+	go kv.watch()
 
 	return kv
 }

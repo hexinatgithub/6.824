@@ -4,3 +4,7 @@ api.key
 .DS_Store
 /.vscode/
 /bin
+.idea/6.824.iml
+.idea/modules.xml
+.idea/vcs.xml
+.idea/workspace.xml

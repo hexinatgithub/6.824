@@ -55,7 +55,7 @@ func (rf *Raft) changeState(state int, f func()) {
 	defer rf.mu.Unlock()
 	if state != rf.state {
 		rf.state = state
-		rf.stateHandle = makeStateHandler(rf, state)
+		rf.stateHandler = makeStateHandler(rf, state)
 	}
 	if f != nil {
 		f()

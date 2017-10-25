@@ -78,7 +78,7 @@ type Raft struct {
 	grantVote   chan struct{}
 
 	// state
-	stateHandle func()
+	stateHandler func()
 	state       int
 
 	// timer
@@ -527,15 +527,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.becomeFlw = make(chan struct{}, 1)
 	rf.applyCh = applyCh
 	rf.timer = time.NewTimer(-1)
-	rf.stateHandle = makeStateHandler(rf, follower)
+	rf.stateHandler = makeStateHandler(rf, follower)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	
 	// state machine handler
 	go func() {
 		rf.stopTimer()
 		for {
-			rf.stateHandle()
+			rf.stateHandler()
 		}
 	}()
 
