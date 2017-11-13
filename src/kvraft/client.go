@@ -13,7 +13,7 @@ type Clerk struct {
 	mu        sync.Mutex
 	requestID int
 	seesionID int64
-	leader	  int
+	leader    int
 }
 
 func nrand() int64 {
@@ -56,7 +56,7 @@ func (ck *Clerk) Get(key string) string {
 	args.RequstID = ck.requestID
 	ck.requestID++
 	ck.mu.Unlock()
-	
+
 	for {
 		for i := ck.leader; ; {
 			var reply GetReply
@@ -99,12 +99,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.RequstID = ck.requestID
 	ck.requestID++
 	ck.mu.Unlock()
-	
+
 	for {
 		for i := ck.leader; ; {
 			var reply PutAppendReply
 			ok := ck.servers[i].Call("RaftKV.PutAppend", &args, &reply)
-			if ok && !reply.WrongLeader{
+			if ok && !reply.WrongLeader {
 				ck.SaveLeader(i)
 				switch reply.Err {
 				case OK:
@@ -123,7 +123,7 @@ func (ck *Clerk) SaveLeader(serve int) {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 	ck.leader = serve
-}	
+}
 
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, OP_PUT)

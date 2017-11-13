@@ -18,6 +18,13 @@ func min(x, y int) int {
 	return y
 }
 
+func max(x, y int) int {
+	if x > y {
+		return x
+	}
+	return y
+}
+
 func (rf *Raft) stopTimer() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -42,8 +49,6 @@ func (rf *Raft) resetTimer(duration time.Duration) {
 
 func (rf *Raft) becomeFollower() {
 	rf.stopTimer()
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	rf.becomeFlw <- struct{}{}
 }
 
@@ -57,9 +62,7 @@ func (rf *Raft) changeState(state int, f func()) {
 		rf.state = state
 		rf.stateHandler = makeStateHandler(rf, state)
 	}
-	if f != nil {
-		f()
-	}
+	f()
 }
 
 func electionTime() time.Duration {
@@ -78,7 +81,7 @@ func makeFollowerHandler(rf *Raft) func() {
 			rf.changeState(candidate, func() {
 				rf.currentTerm++
 				rf.canBeLeader = make(chan struct{}, 1)
-				rf.broadcoastRequestVote()
+				rf.broadcastRequestVote()
 			})
 		}
 	}
@@ -99,18 +102,18 @@ func makeCandidateHandler(rf *Raft) func() {
 			rf.changeState(leader, func() {
 				rf.nextIndex = make([]int, len(rf.peers), len(rf.peers))
 				rf.matchIndex = make([]int, len(rf.peers), len(rf.peers))
-				logLength := len(rf.log)
+				lastIndex, _ := rf.logsLastIndexAndTerm()
 				for i := range rf.nextIndex {
-					rf.nextIndex[i] = logLength
-					rf.matchIndex[i] = -1
+					rf.nextIndex[i] = lastIndex + 1
+					rf.matchIndex[i] = lastIndex
 				}
 				closeChan()
-				rf.broadcoastAppendEntries()
+				rf.broadcastAppendEntries()
 			})
 		case <-rf.timer.C:
 			rf.changeState(candidate, func() {
 				rf.currentTerm++
-				rf.broadcoastRequestVote()
+				rf.broadcastRequestVote()
 			})
 		}
 	}
@@ -129,7 +132,7 @@ func makeLeaderHandler(rf *Raft) func() {
 		case <-rf.becomeFlw:
 			rf.changeState(follower, releaseFun)
 		case <-rf.timer.C:
-			rf.changeState(leader, rf.broadcoastAppendEntries)
+			rf.changeState(leader, rf.broadcastAppendEntries)
 		}
 	}
 }

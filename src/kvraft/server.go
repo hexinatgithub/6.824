@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"encoding/gob"
 	"labrpc"
 	"log"
@@ -52,10 +53,14 @@ func (op *Op) isEqual(other Op) bool {
 }
 
 type CommitReply struct {
+	// CommitReply object send back from watch goroutine inlucde
+	// some information the RPC call need to reply to client.
 	op  Op
 	err Err
 }
 
+// ApplyReply include some information the RaftKV whether or not
+// apply some log success.
 type ApplyReply CommitReply
 
 type RaftKV struct {
@@ -69,7 +74,7 @@ type RaftKV struct {
 	// Your definitions here.
 	data        map[string]string
 	commitReply map[int]chan CommitReply
-	history     map[int64]int // client session map to commited requstID
+	history     map[int64]int // client session map to committed requestID
 }
 
 func (kv *RaftKV) commitLog(op Op) CommitReply {
@@ -145,7 +150,7 @@ func (kv *RaftKV) applyLog(op Op) ApplyReply {
 		reply.op.Value = kv.data[op.Key]
 		return reply
 	}
-	
+
 	// apply log
 	switch op.Kind {
 	case OP_GET:
@@ -167,18 +172,52 @@ func (kv *RaftKV) applyLog(op Op) ApplyReply {
 
 func (kv *RaftKV) watch() {
 	for msg := range kv.applyCh {
-		kv.mu.Lock()
-		op := msg.Command.(Op)
-		applyReply := kv.applyLog(op)
-		
-		// only leader have reply channel
-		rplChan, ok := kv.commitReply[msg.Index]
+		func() {
+			kv.mu.Lock()
+			defer kv.mu.Unlock()
 
-		if ok {
-			rplChan <- CommitReply(applyReply)
-		}
-		kv.mu.Unlock()
+			// use snapshot to restore state.
+			if msg.UseSnapshot {
+				kv.restoreSnapshot(msg.Snapshot)
+				return
+			}
+
+			op := msg.Command.(Op)
+			applyReply := kv.applyLog(op)
+
+			// only leader have reply channel
+			rplChan, ok := kv.commitReply[msg.Index]
+			if ok {
+				rplChan <- CommitReply(applyReply)
+			}
+
+			// If the max raft state size greater than raft state size,
+			// then save the snapshot.
+			exceedSize := kv.maxraftstate > -1 &&
+				kv.maxraftstate <= kv.rf.Persister.RaftStateSize()
+			if exceedSize {
+				kv.saveSnapshot(msg.Index - 1)
+			}
+		}()
 	}
+}
+
+func (kv *RaftKV) saveSnapshot(index int) {
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(kv.data)
+	e.Encode(kv.history)
+	data := w.Bytes()
+	kv.rf.SaveSnapshot(index, data)
+}
+
+func (kv *RaftKV) restoreSnapshot(data []byte) {
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	kv.data = make(map[string]string)
+	kv.history = make(map[int64]int)
+	d.Decode(&kv.data)
+	d.Decode(&kv.history)
 }
 
 //
@@ -216,7 +255,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
-	kv.applyCh = make(chan raft.ApplyMsg, 10)
+	kv.applyCh = make(chan raft.ApplyMsg, 100)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.data = make(map[string]string)
 	kv.history = make(map[int64]int)

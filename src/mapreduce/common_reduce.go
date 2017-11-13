@@ -1,10 +1,10 @@
 package mapreduce
 
 import (
-	"io"
-	"sort"
-	"os"
 	"encoding/json"
+	"io"
+	"os"
+	"sort"
 )
 
 // doReduce manages one reduce task: it reads the intermediate
@@ -58,7 +58,7 @@ func doReduce(
 		inFileName := reduceName(jobName, i, reduceTaskNumber)
 		inFile, err := os.Open(inFileName)
 		if err != nil {
-			panic("can't open file:"+inFileName)
+			panic("can't open file:" + inFileName)
 		}
 		defer inFile.Close()
 
@@ -77,7 +77,7 @@ func doReduce(
 	// reduce
 	out_fd, err := os.Create(outFile)
 	if err != nil {
-		panic("can't create file:"+outFile)
+		panic("can't create file:" + outFile)
 	}
 	defer out_fd.Close()
 	enc := json.NewEncoder(out_fd)
