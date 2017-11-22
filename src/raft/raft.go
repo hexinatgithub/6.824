@@ -239,7 +239,7 @@ type SnapshotEntries struct {
 	LeaderID          int
 	LastIncludedIndex int
 	LastIncludedTerm  int
-	snapshot          []byte
+	Snapshot          []byte
 }
 
 type SnapshotEntriesReply struct {
@@ -527,7 +527,7 @@ func (rf *Raft) broadcastAppendEntries() {
 				}
 				rf.matchIndex[server] = lastIndex
 			}
-			rf.nextIndex[server] = reply.NextIndex
+			rf.nextIndex[server] = max(reply.NextIndex, 0)
 		}
 	}
 
@@ -541,7 +541,7 @@ func (rf *Raft) broadcastAppendEntries() {
 				return
 			}
 
-			rf.nextIndex[server] = args.LastIncludedIndex + 1
+			rf.nextIndex[server] = max(args.LastIncludedIndex + 1, 0)
 			rf.matchIndex[server] = args.LastIncludedIndex
 		}
 	}
@@ -568,10 +568,6 @@ func (rf *Raft) broadcastAppendEntries() {
 					}
 				}(i)
 			} else {
-				if len(rf.snapshot) == 0 {
-					panic(fmt.Sprintf("%v nextIndex(%v) snapshotIndex(%v)", rf.me, nextIndex, rf.snapshotIndex))
-				}
-
 				args := SnapshotEntries{
 					rf.currentTerm, rf.me, rf.snapshotIndex, rf.snapshotTerm, rf.snapshot}
 				reply := SnapshotEntriesReply{-1, false}
@@ -638,7 +634,7 @@ func (rf *Raft) InstallSnapshot(args *SnapshotEntries, reply *SnapshotEntriesRep
 	go rf.becomeFollower()
 
 	// leader may lost snapshot
-	if len(args.snapshot) == 0 {
+	if len(args.Snapshot) == 0 {
 		return
 	}
 
@@ -653,7 +649,7 @@ func (rf *Raft) InstallSnapshot(args *SnapshotEntries, reply *SnapshotEntriesRep
 	rf.logs = make(raftLogs, 0)
 	rf.snapshotIndex = args.LastIncludedIndex
 	rf.snapshotTerm = args.LastIncludedTerm
-	rf.snapshot = args.snapshot
+	rf.snapshot = args.Snapshot
 	rf.commitIndex = args.LastIncludedIndex
 	rf.lastApplied = rf.commitIndex
 
